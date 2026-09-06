@@ -65,7 +65,7 @@ pub mod rights {
     /// Standard `SYNCHRONIZE` right (use the object for wait operations).
     pub const SYNCHRONIZE: u32 = 0x0010_0000;
 
-    /// `GENERIC_ALL` — resolves to `mapping.all` via [`GenericMapping::map`].
+    /// `GENERIC_ALL` — resolves to `mapping.all` via [`crate::GenericMapping::map`].
     pub const GENERIC_ALL: u32 = 0x1000_0000;
     /// `GENERIC_EXECUTE` — resolves to `mapping.execute`.
     pub const GENERIC_EXECUTE: u32 = 0x2000_0000;
