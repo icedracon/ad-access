@@ -1,0 +1,18 @@
+[package]
+name = "ad-access"
+# Local dev SCAFFOLD. Publish as 0.1.0-beta.1 per adhammer/docs/PLAN_1.5.1.md
+# B-5 once the core is complete. This is a starting skeleton, not a finished
+# effective-access engine — see the TODO surface in lib.rs.
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+authors = ["zevs"]
+description = "Windows effective-access / token evaluator: given a security descriptor and a token, compute resultant access (ordered ACE evaluation, deny-before-allow, owner rights, generic mapping). Zero dependencies. Early scaffold."
+keywords = ["access-control", "acl", "security", "windows", "authorization"]
+categories = ["authentication"]
+readme = "README.md"
+
+[dependencies]
+# none — pure logic over parsed SD/token structures. SDDL/token parsing is a
+# caller concern (e.g. the in-house `windows-sddl` / `ad-acl` crates).
