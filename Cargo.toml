@@ -5,7 +5,7 @@ name = "ad-access"
 # conditional-ACE evaluator, mandatory-integrity) is validated 30/30 against
 # Windows AuthzAccessCheck. Inheritance merge / RESTRICTED tokens / object-type
 # ACEs are the still-TODO surface — see lib.rs.
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 edition = "2021"
 rust-version = "1.88"
 license = "MIT"
@@ -14,6 +14,7 @@ description = "Windows effective-access / token evaluator: given a security desc
 keywords = ["access-control", "acl", "security", "windows", "authorization"]
 categories = ["authentication"]
 readme = "README.md"
+repository = "https://github.com/icedracon/ad-access"
 
 [dependencies]
 # none — pure logic over parsed SD/token structures. SDDL/token parsing is a
