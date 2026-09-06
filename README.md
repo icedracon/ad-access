@@ -2,7 +2,7 @@
 
 A **Windows effective-access / token evaluator** for Rust — given a security
 descriptor and a token, compute the *resultant* access a principal actually
-has. This is the primitive attack-path and audit tools approximate (and often
+has. This is the primitive audit and attack-path tools approximate (and often
 get wrong): it answers "who can **actually** write this object", not "who has
 an ACE mentioning it".
 

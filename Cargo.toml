@@ -1,14 +1,16 @@
 [package]
 name = "ad-access"
-# Local dev SCAFFOLD. Publish as 0.1.0-beta.1 per adhammer/docs/PLAN_1.5.1.md
-# B-5 once the core is complete. This is a starting skeleton, not a finished
-# effective-access engine — see the TODO surface in lib.rs.
-version = "0.1.0"
+# Publish as 0.1.0-beta.1 per adhammer/docs/PLAN_1.5.1.md B-5. Unstable API;
+# the core (ordered DACL, deny-before-allow, owner rights, generic mapping,
+# conditional-ACE evaluator, mandatory-integrity) is validated 30/30 against
+# Windows AuthzAccessCheck. Inheritance merge / RESTRICTED tokens / object-type
+# ACEs are the still-TODO surface — see lib.rs.
+version = "0.1.0-beta.1"
 edition = "2021"
 rust-version = "1.88"
 license = "MIT"
 authors = ["zevs"]
-description = "Windows effective-access / token evaluator: given a security descriptor and a token, compute resultant access (ordered ACE evaluation, deny-before-allow, owner rights, generic mapping). Zero dependencies. Early scaffold."
+description = "Windows effective-access / token evaluator: given a security descriptor and a token, compute resultant access (ordered DACL, deny-before-allow, owner rights, generic mapping, conditional ACEs, mandatory integrity). Validated against Windows AuthzAccessCheck. Zero dependencies."
 keywords = ["access-control", "acl", "security", "windows", "authorization"]
 categories = ["authentication"]
 readme = "README.md"

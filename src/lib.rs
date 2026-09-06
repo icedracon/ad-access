@@ -1,9 +1,9 @@
 //! `ad-access` — a Windows effective-access / token evaluator.
 //!
 //! Given a [`SecurityDescriptor`] and an [`AccessToken`], compute the
-//! *resultant* access a principal actually has — the answer BloodHound-style
-//! tools approximate and get wrong. It answers "who can *actually* write this
-//! object", not "who has an ACE that mentions it".
+//! *resultant* access a principal actually has — the answer graph-based
+//! attack-path tools approximate and get wrong. It answers "who can
+//! *actually* write this object", not "who has an ACE that mentions it".
 //!
 //! ## Implemented
 //!
@@ -39,26 +39,41 @@
 //! let d = access_check(&sd, &token, rights::FILE_READ_DATA, &GenericMapping::FILE);
 //! assert!(d.allowed);
 //! ```
+#![deny(missing_docs)]
 
 /// A security identifier, in SDDL string form (`S-1-5-...`).
 pub type Sid = String;
 
 /// Windows access-right bits (a representative subset).
 pub mod rights {
+    /// `FILE_READ_DATA` — read the contents of a file.
     pub const FILE_READ_DATA: u32 = 0x0000_0001;
+    /// `FILE_WRITE_DATA` — write bytes into a file, overwriting existing data.
     pub const FILE_WRITE_DATA: u32 = 0x0000_0002;
+    /// `FILE_APPEND_DATA` — append bytes to a file.
     pub const FILE_APPEND_DATA: u32 = 0x0000_0004;
+    /// `FILE_EXECUTE` — execute the file / traverse the directory.
     pub const FILE_EXECUTE: u32 = 0x0000_0020;
+    /// Standard `DELETE` right.
     pub const DELETE: u32 = 0x0001_0000;
+    /// Standard `READ_CONTROL` right (read the security descriptor).
     pub const READ_CONTROL: u32 = 0x0002_0000;
+    /// Standard `WRITE_DAC` right (change the DACL).
     pub const WRITE_DAC: u32 = 0x0004_0000;
+    /// Standard `WRITE_OWNER` right (change the owner).
     pub const WRITE_OWNER: u32 = 0x0008_0000;
+    /// Standard `SYNCHRONIZE` right (use the object for wait operations).
     pub const SYNCHRONIZE: u32 = 0x0010_0000;
 
+    /// `GENERIC_ALL` — resolves to `mapping.all` via [`GenericMapping::map`].
     pub const GENERIC_ALL: u32 = 0x1000_0000;
+    /// `GENERIC_EXECUTE` — resolves to `mapping.execute`.
     pub const GENERIC_EXECUTE: u32 = 0x2000_0000;
+    /// `GENERIC_WRITE` — resolves to `mapping.write`.
     pub const GENERIC_WRITE: u32 = 0x4000_0000;
+    /// `GENERIC_READ` — resolves to `mapping.read`.
     pub const GENERIC_READ: u32 = 0x8000_0000;
+    /// Mask covering all four generic bits, useful for stripping them.
     pub const GENERIC_MASK: u32 = GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | GENERIC_ALL;
 
     /// Write-class rights subject to the mandatory-integrity no-write-up rule.
@@ -69,10 +84,15 @@ pub mod rights {
 /// Mandatory integrity levels, ordered low → high.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum IntegrityLevel {
+    /// Lowest integrity — sandboxed processes.
     Untrusted,
+    /// Low integrity — the AppContainer / protected-mode browser tier.
     Low,
+    /// Medium integrity — the default interactive-user tier.
     Medium,
+    /// High integrity — elevated / administrator tier.
     High,
+    /// System integrity — kernel / `SYSTEM` tier.
     System,
 }
 
@@ -80,9 +100,13 @@ pub enum IntegrityLevel {
 /// `MapGenericMask` does before an access check.
 #[derive(Clone, Debug)]
 pub struct GenericMapping {
+    /// Right bits that `GENERIC_READ` maps to.
     pub read: u32,
+    /// Right bits that `GENERIC_WRITE` maps to.
     pub write: u32,
+    /// Right bits that `GENERIC_EXECUTE` maps to.
     pub execute: u32,
+    /// Right bits that `GENERIC_ALL` maps to.
     pub all: u32,
 }
 
@@ -125,7 +149,9 @@ impl GenericMapping {
 /// A claim value carried by a token (simplified: string or integer).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClaimValue {
+    /// String-valued claim.
     Str(String),
+    /// Integer-valued claim.
     Int(i64),
 }
 
@@ -144,8 +170,11 @@ pub enum Condition {
     ClaimEq(String, ClaimValue),
     /// A named claim is present.
     ClaimPresent(String),
+    /// Logical negation of the inner condition.
     Not(Box<Condition>),
+    /// Logical AND of all inner conditions.
     And(Vec<Condition>),
+    /// Logical OR of any inner condition.
     Or(Vec<Condition>),
 }
 
@@ -166,30 +195,40 @@ impl Condition {
     }
 }
 
+/// Whether an ACE grants access (ALLOW) or denies it (DENY).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AceKind {
+    /// `ACCESS_ALLOWED` — grants the mask bits.
     Allowed,
+    /// `ACCESS_DENIED` — denies the mask bits (checked before Allowed in canonical order).
     Denied,
 }
 
 /// One access-control entry (inheritance flags assumed already resolved).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ace {
+    /// ALLOW or DENY.
     pub kind: AceKind,
+    /// Trustee SID.
     pub sid: Sid,
+    /// Access-rights mask this ACE grants or denies.
     pub mask: u32,
+    /// Conditional guard (`Condition::Always` for a plain ACE).
     pub condition: Condition,
 }
 
 impl Ace {
+    /// Shorthand for a plain `ACCESS_ALLOWED` ACE with no condition.
     pub fn allow(sid: &str, mask: u32) -> Ace {
         Ace::new(AceKind::Allowed, sid, mask, Condition::Always)
     }
 
+    /// Shorthand for a plain `ACCESS_DENIED` ACE with no condition.
     pub fn deny(sid: &str, mask: u32) -> Ace {
         Ace::new(AceKind::Denied, sid, mask, Condition::Always)
     }
 
+    /// Build an ACE from all four fields.
     pub fn new(kind: AceKind, sid: &str, mask: u32, condition: Condition) -> Ace {
         Ace {
             kind,
@@ -210,13 +249,18 @@ impl Ace {
 pub enum Acl {
     /// No DACL present — grants everyone full access (Windows semantics).
     Null,
+    /// A concrete list of ACEs (assumed already merged from inheritance).
     Entries(Vec<Ace>),
 }
 
+/// A security descriptor: owner + group + DACL + optional mandatory-integrity label.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SecurityDescriptor {
+    /// Owner SID — gets `READ_CONTROL` + `WRITE_DAC` implicitly.
     pub owner: Sid,
+    /// Group SID (informational; not used by the current evaluator).
     pub group: Sid,
+    /// Discretionary access-control list.
     pub dacl: Acl,
     /// The object's mandatory integrity label, if any (from the SACL).
     pub mandatory_label: Option<IntegrityLevel>,
@@ -234,6 +278,7 @@ impl SecurityDescriptor {
         }
     }
 
+    /// Attach a mandatory-integrity label to the descriptor.
     pub fn with_label(mut self, label: IntegrityLevel) -> SecurityDescriptor {
         self.mandatory_label = Some(label);
         self
@@ -243,17 +288,27 @@ impl SecurityDescriptor {
 /// Token privileges that override or short-circuit the DACL.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Privilege {
+    /// `SeBackupPrivilege` — grants read-class rights regardless of DACL.
     SeBackup,
+    /// `SeRestorePrivilege` — grants write-class rights + WRITE_DAC + WRITE_OWNER.
     SeRestore,
+    /// `SeTakeOwnershipPrivilege` — grants WRITE_OWNER.
     SeTakeOwnership,
 }
 
+/// A subject access token: user SID, group memberships, privileges,
+/// integrity level, and named claims.
 #[derive(Clone, Debug)]
 pub struct AccessToken {
+    /// User SID.
     pub user: Sid,
+    /// Group SIDs the token holds (including built-ins like Authenticated Users).
     pub groups: Vec<Sid>,
+    /// Enabled privileges.
     pub privileges: Vec<Privilege>,
+    /// Token's mandatory integrity level.
     pub integrity: IntegrityLevel,
+    /// Named claims (for conditional-ACE evaluation).
     pub claims: Vec<(String, ClaimValue)>,
 }
 
@@ -269,16 +324,19 @@ impl AccessToken {
         }
     }
 
+    /// Grant the token a set of privileges.
     pub fn with_privileges(mut self, privs: &[Privilege]) -> AccessToken {
         self.privileges = privs.to_vec();
         self
     }
 
+    /// Set the token's mandatory integrity level.
     pub fn with_integrity(mut self, level: IntegrityLevel) -> AccessToken {
         self.integrity = level;
         self
     }
 
+    /// Attach a named claim to the token (for conditional-ACE evaluation).
     pub fn with_claim(mut self, name: &str, value: ClaimValue) -> AccessToken {
         self.claims.push((name.into(), value));
         self
