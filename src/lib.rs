@@ -20,14 +20,23 @@
 //!   integrity is below the object's mandatory label cannot obtain write-class
 //!   rights.
 //!
-//! ## Still TODO (validation-gated)
+//! - **Inheritance flags** — `INHERIT_ONLY` ACEs do not apply to the object
+//!   itself (see [`ace_flags`]).
+//! - **Object-type ACEs** — AD property-set / extended-right GUID matching via
+//!   [`access_check_object`] (this is how DCSync, per-attribute writes, and
+//!   control-access rights are expressed in AD security descriptors).
+//! - Every rule above validated 1:1 against Windows `AuthzAccessCheck` /
+//!   `AuthzAccessCheckByType`; the corpus is baked into `tests/conformance.rs`.
 //!
-//! - Parsing an SDDL conditional-expression *string* into a [`Condition`] (the
-//!   AST + evaluator are here; the string tokenizer belongs to the SD parser).
-//! - RESTRICTED / filtered tokens (the restricting-SID second pass).
-//! - Inheritance / auto-inherit merge (this evaluator takes an already-merged DACL).
-//! - Object-type ACEs (AD property-set / control-access-right GUIDs).
-//! - A conformance corpus validated against Windows `AuthzAccessCheck`.
+//! ## Explicit non-goals (documented, not gaps)
+//!
+//! - Parsing an SDDL conditional-expression *string* into a [`Condition`] — the
+//!   AST + evaluator are here; string tokenizing belongs to the SD parser
+//!   (`windows-sddl`).
+//! - RESTRICTED / filtered tokens (the restricting-SID second pass) — rare in
+//!   practice; not modeled.
+//! - Hierarchical object-type lists (property set → member properties). The
+//!   flat single-type check covers the common AD queries.
 //!
 //! ```
 //! use ad_access::*;
@@ -43,6 +52,60 @@
 
 /// A security identifier, in SDDL string form (`S-1-5-...`).
 pub type Sid = String;
+
+/// A 128-bit GUID — an AD property-set, extended-right, or object-class
+/// identifier used as an object ACE's `ObjectType`.
+///
+/// Stored as the 16 bytes of the canonical string in order (not Windows'
+/// mixed-endian binary layout); comparison is symmetric, so as long as both
+/// the ACE and the request build their `Guid` via [`Guid::parse`], matching is
+/// correct.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Guid([u8; 16]);
+
+impl Guid {
+    /// Wrap 16 raw bytes.
+    pub fn from_bytes(b: [u8; 16]) -> Guid {
+        Guid(b)
+    }
+
+    /// The raw bytes.
+    pub fn bytes(&self) -> [u8; 16] {
+        self.0
+    }
+
+    /// Parse the canonical `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` form
+    /// (dashes optional, case-insensitive). Returns `None` if it isn't 32 hex
+    /// digits.
+    pub fn parse(s: &str) -> Option<Guid> {
+        let hex: Vec<u8> = s.bytes().filter(|b| *b != b'-').collect();
+        if hex.len() != 32 {
+            return None;
+        }
+        let mut out = [0u8; 16];
+        for (i, byte) in out.iter_mut().enumerate() {
+            let hi = (hex[2 * i] as char).to_digit(16)?;
+            let lo = (hex[2 * i + 1] as char).to_digit(16)?;
+            *byte = (hi * 16 + lo) as u8;
+        }
+        Some(Guid(out))
+    }
+}
+
+/// SDDL access-control-entry flags (MS-DTYP 2.4.4.1).
+pub mod ace_flags {
+    /// `OBJECT_INHERIT_ACE` — propagates to child objects.
+    pub const OBJECT_INHERIT: u8 = 0x01;
+    /// `CONTAINER_INHERIT_ACE` — propagates to child containers.
+    pub const CONTAINER_INHERIT: u8 = 0x02;
+    /// `NO_PROPAGATE_INHERIT_ACE` — inheritance does not propagate past one level.
+    pub const NO_PROPAGATE_INHERIT: u8 = 0x04;
+    /// `INHERIT_ONLY_ACE` — the ACE applies to children only, **not** the object
+    /// carrying it. Such ACEs are skipped when evaluating access to the object.
+    pub const INHERIT_ONLY: u8 = 0x08;
+    /// `INHERITED_ACE` — set on ACEs that were auto-inherited (informational).
+    pub const INHERITED: u8 = 0x10;
+}
 
 /// Windows access-right bits (a representative subset).
 pub mod rights {
@@ -204,7 +267,7 @@ pub enum AceKind {
     Denied,
 }
 
-/// One access-control entry (inheritance flags assumed already resolved).
+/// One access-control entry.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ace {
     /// ALLOW or DENY.
@@ -215,6 +278,11 @@ pub struct Ace {
     pub mask: u32,
     /// Conditional guard (`Condition::Always` for a plain ACE).
     pub condition: Condition,
+    /// Inheritance flags (see [`ace_flags`]). `0` for a plain, non-inherited ACE.
+    pub flags: u8,
+    /// Object-type GUID for `ACCESS_ALLOWED_OBJECT` / `_DENIED_OBJECT` ACEs.
+    /// `None` = a plain ACE that grants/denies on the object as a whole.
+    pub object_type: Option<Guid>,
 }
 
 impl Ace {
@@ -228,19 +296,55 @@ impl Ace {
         Ace::new(AceKind::Denied, sid, mask, Condition::Always)
     }
 
-    /// Build an ACE from all four fields.
+    /// Build an ACE from the four core fields (flags `0`, no object type).
     pub fn new(kind: AceKind, sid: &str, mask: u32, condition: Condition) -> Ace {
         Ace {
             kind,
             sid: sid.into(),
             mask,
             condition,
+            flags: 0,
+            object_type: None,
         }
     }
 
-    /// Does this ACE apply to `token` — trustee SID present AND condition met?
-    fn applies(&self, token: &AccessToken) -> bool {
-        token.contains_sid(&self.sid) && self.condition.eval(token)
+    /// Set inheritance flags (see [`ace_flags`]).
+    pub fn with_flags(mut self, flags: u8) -> Ace {
+        self.flags = flags;
+        self
+    }
+
+    /// Turn this into an object ACE bound to `guid` (a property-set /
+    /// extended-right / object-class GUID).
+    pub fn with_object_type(mut self, guid: Guid) -> Ace {
+        self.object_type = Some(guid);
+        self
+    }
+
+    /// Does this ACE apply, given the requesting `token` and the requested
+    /// object type (`None` for a plain access check)?
+    ///
+    /// - `INHERIT_ONLY` ACEs never apply to the object itself.
+    /// - The trustee SID must be in the token and any condition must hold.
+    /// - Object matching (matches Windows `AuthzAccessCheck`):
+    ///   - a **plain** ACE (no `ObjectType`) always applies — it grants/denies
+    ///     on the object as a whole, for any request;
+    ///   - an **object** ACE applies only in an object-typed check whose
+    ///     requested type equals the ACE's `ObjectType`. It does **not** fire
+    ///     in a plain check — an object ACE grants a *specific* right, not the
+    ///     right generally.
+    fn applies(&self, token: &AccessToken, requested: Option<&Guid>) -> bool {
+        if self.flags & ace_flags::INHERIT_ONLY != 0 {
+            return false;
+        }
+        if !token.contains_sid(&self.sid) || !self.condition.eval(token) {
+            return false;
+        }
+        match (requested, &self.object_type) {
+            (_, None) => true, // plain ACE — applies to the whole object
+            (Some(want), Some(have)) => want == have, // object check — GUID must match
+            (None, Some(_)) => false, // plain check — object ACE does not fire
+        }
     }
 }
 
@@ -371,12 +475,38 @@ pub struct Decision {
     pub still_denied: u32,
 }
 
-/// Compute resultant access for `desired` rights. `desired` may contain generic
-/// bits; they are mapped through `mapping` first.
+/// Compute resultant access for `desired` rights with no object-type context —
+/// object ACEs apply as plain ACEs, matching Windows `AccessCheck`. `desired`
+/// may contain generic bits; they are mapped through `mapping` first.
 pub fn access_check(
     sd: &SecurityDescriptor,
     token: &AccessToken,
     desired: u32,
+    mapping: &GenericMapping,
+) -> Decision {
+    check(sd, token, desired, None, mapping)
+}
+
+/// Compute resultant access for `desired` rights **against a specific object
+/// type** — the AD query for property-set / extended-right / control-access
+/// rights, matching Windows `AccessCheckByType`. An object ACE applies only
+/// when its `ObjectType` equals `object_type` (or it has none); a plain ACE
+/// always applies.
+pub fn access_check_object(
+    sd: &SecurityDescriptor,
+    token: &AccessToken,
+    desired: u32,
+    object_type: &Guid,
+    mapping: &GenericMapping,
+) -> Decision {
+    check(sd, token, desired, Some(object_type), mapping)
+}
+
+fn check(
+    sd: &SecurityDescriptor,
+    token: &AccessToken,
+    desired: u32,
+    requested: Option<&Guid>,
     mapping: &GenericMapping,
 ) -> Decision {
     let desired = mapping.map(desired);
@@ -444,7 +574,7 @@ pub fn access_check(
                 if remaining == 0 {
                     break;
                 }
-                if !ace.applies(token) {
+                if !ace.applies(token, requested) {
                     continue;
                 }
                 match ace.kind {

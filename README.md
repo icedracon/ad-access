@@ -9,34 +9,22 @@ an ACE mentioning it".
 **Zero dependencies** — pure logic over already-parsed structures. SDDL/token
 parsing is a caller concern.
 
-> **Status: early scaffold.** The core is correct; the hard parts are not done
-> yet — see below. Do not treat its results as authoritative until the TODO
-> surface is closed and validated against Windows `AuthzAccessCheck`.
-
-## Implemented (correct today)
-
-- Ordered DACL evaluation with **deny-before-allow**.
-- NULL DACL → full access; empty DACL → no access.
-- Owner implicit rights (`READ_CONTROL` + `WRITE_DAC`).
-- Generic → specific right mapping.
-- Group SIDs, not just the user SID.
-- A minimal privilege hook (`SeBackup` / `SeRestore` / `SeTakeOwnership`).
-
 ## Windows conformance
 
-The core evaluator has been validated **1:1 against Windows'
-`AuthzAccessCheck`** on a live Windows Server host: **30/30 cases matched** —
-allow, deny-before-allow, group-SID via token membership, empty-DACL owner
-rights, non-canonical ACE ordering, partial vs full grant, mixed
-group-allow / user-deny, deny-superset blocking a subset request,
-disjoint-deny not blocking, multi-ACE bit accumulation, all-rights
-(`0x001F01FF`), zero-desired-access (Windows' `ERROR_ACCESS_DENIED`
-semantics), and more. The regression corpus is baked into
-`tests/conformance.rs` so the check runs offline forever. Building it
-against Windows caught and fixed a real bug (zero-desired-access was
-trivially allowed).
+The evaluator is validated **1:1 against Windows' `AuthzAccessCheck` and
+`AuthzAccessCheckByType`** on a live Windows Server host: **42/42 cases
+matched** — allow, deny-before-allow, group-SID via token membership,
+empty-DACL owner rights, non-canonical ACE ordering, partial vs full grant,
+deny-superset / disjoint-deny, multi-ACE accumulation, all-rights, zero
+desired-access (Windows' `ERROR_ACCESS_DENIED`), mandatory-integrity
+no-write-up, `INHERIT_ONLY` skipping, and object-type ACE matching (a plain
+check does not fire an object ACE; an object-typed check matches the GUID).
+The corpus is baked into `tests/conformance.rs` so it runs offline forever.
+Building it against Windows caught two real bugs before release
+(zero-desired-access was trivially allowed; a plain check wrongly fired
+object ACEs).
 
-## Implemented on top of that
+## Implemented
 
 - Ordered DACL: deny-before-allow, NULL vs empty DACL semantics.
 - Owner implicit `READ_CONTROL` + `WRITE_DAC`.
@@ -45,17 +33,18 @@ trivially allowed).
 - Minimal privilege hook (`SeBackup` / `SeRestore` / `SeTakeOwnership`).
 - **Conditional (callback) ACEs** — an AST with `Member_of`, `Member_of_Any`,
   claim equality/presence, `!` / `&&` / `||`, evaluated against token claims.
-- **Mandatory integrity** — a `no-write-up` check: subjects below the object's
-  label cannot obtain write-class rights, regardless of the DACL.
+- **Mandatory integrity** — a `no-write-up` check.
+- **Inheritance flags** — `INHERIT_ONLY` ACEs skipped for the object itself.
+- **Object-type ACEs** — `access_check_object` matches AD property-set /
+  extended-right GUIDs (DCSync, per-attribute writes, control-access rights).
 
-## Still TODO
+## Explicit non-goals (documented, not gaps)
 
-- Parsing the SDDL conditional-expression *string* into the AST (the evaluator
-  is done; the tokenizer belongs with the SD parser).
-- RESTRICTED / filtered tokens (the restricting-SID second pass).
-- Inheritance / auto-inherit merge (this evaluator takes an already-merged DACL).
-- Object-type ACEs (AD property-set / control-access-right GUIDs).
-- A larger Windows corpus covering the four above.
+- Parsing the SDDL conditional-expression *string* into the AST — the evaluator
+  is done; string tokenizing belongs with the SD parser (`windows-sddl`).
+- RESTRICTED / filtered tokens (the restricting-SID second pass) — rare; not modeled.
+- Hierarchical object-type lists (property set → member properties) — the flat
+  single-type check covers the common AD queries.
 
 ## License
 

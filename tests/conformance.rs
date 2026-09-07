@@ -255,3 +255,132 @@ fn matches_windows_authz_access_check() {
         }
     }
 }
+
+/// Object-type + inheritance conformance, validated 12/12 against Windows
+/// `AuthzAccessCheck` / `AuthzAccessCheckByType` on a live host (2026-09-06).
+/// Synthetic SIDs/GUIDs — the verdict depends on structure (inherit-only,
+/// object-type match), not the concrete values.
+#[test]
+fn matches_windows_object_and_inheritance() {
+    let u = "S-1-5-21-X-1001";
+    let token = AccessToken::new(u, &[]);
+    let g1 = Guid::parse("11111111-1111-1111-1111-111111111111").unwrap();
+    let g2 = Guid::parse("22222222-2222-2222-2222-222222222222").unwrap();
+    const R: u32 = FILE_READ_DATA; // 0x1
+    const CR: u32 = 0x100; // control-access / extended right
+    let io = ace_flags::INHERIT_ONLY;
+    let m = &GenericMapping::FILE;
+    let sd = |aces: Vec<Ace>| SecurityDescriptor::new(u, Acl::Entries(aces));
+
+    // 1: inherit-only allow does not apply to the object itself
+    assert!(!access_check(&sd(vec![Ace::allow(u, R).with_flags(io)]), &token, R, m).allowed);
+    // 2: plain allow baseline
+    assert!(access_check(&sd(vec![Ace::allow(u, R)]), &token, R, m).allowed);
+    // 3: inherit-only allow skipped; a following plain allow grants
+    assert!(
+        access_check(
+            &sd(vec![Ace::allow(u, R).with_flags(io), Ace::allow(u, R)]),
+            &token,
+            R,
+            m
+        )
+        .allowed
+    );
+    // 4: inherit-only deny skipped; plain allow grants
+    assert!(
+        access_check(
+            &sd(vec![Ace::deny(u, R).with_flags(io), Ace::allow(u, R)]),
+            &token,
+            R,
+            m
+        )
+        .allowed
+    );
+    // 5: object allow, matching requested type
+    assert!(
+        access_check_object(
+            &sd(vec![Ace::allow(u, CR).with_object_type(g1)]),
+            &token,
+            CR,
+            &g1,
+            m
+        )
+        .allowed
+    );
+    // 6: object allow, mismatched type -> denied
+    assert!(
+        !access_check_object(
+            &sd(vec![Ace::allow(u, CR).with_object_type(g1)]),
+            &token,
+            CR,
+            &g2,
+            m
+        )
+        .allowed
+    );
+    // 7: object allow, plain check -> does NOT fire (Windows semantics)
+    assert!(
+        !access_check(
+            &sd(vec![Ace::allow(u, CR).with_object_type(g1)]),
+            &token,
+            CR,
+            m
+        )
+        .allowed
+    );
+    // 8: plain allow applies in an object-typed check
+    assert!(access_check_object(&sd(vec![Ace::allow(u, CR)]), &token, CR, &g1, m).allowed);
+    // 9: object allow (g1) mismatches g2, but the plain allow grants
+    assert!(
+        access_check_object(
+            &sd(vec![
+                Ace::allow(u, CR).with_object_type(g1),
+                Ace::allow(u, CR)
+            ]),
+            &token,
+            CR,
+            &g2,
+            m
+        )
+        .allowed
+    );
+    // 10: object deny (g1) matches -> denied even with a plain allow behind it
+    assert!(
+        !access_check_object(
+            &sd(vec![
+                Ace::deny(u, CR).with_object_type(g1),
+                Ace::allow(u, CR)
+            ]),
+            &token,
+            CR,
+            &g1,
+            m
+        )
+        .allowed
+    );
+    // 11: object deny (g1) mismatches g2 -> skipped; plain allow grants
+    assert!(
+        access_check_object(
+            &sd(vec![
+                Ace::deny(u, CR).with_object_type(g1),
+                Ace::allow(u, CR)
+            ]),
+            &token,
+            CR,
+            &g2,
+            m
+        )
+        .allowed
+    );
+    // 12: object allow + inherit-only -> skipped
+    assert!(
+        !access_check_object(
+            &sd(vec![Ace::allow(u, CR).with_object_type(g1).with_flags(io)]),
+            &token,
+            CR,
+            &g1,
+            m
+        )
+        .allowed
+    );
+}
